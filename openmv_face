@@ -1,0 +1,176 @@
+'''
+>> author: SXF
+>> email: songxf1024@163.com
+>> description:
+  用LBP特征进行人脸识别，可进行人脸注册、人脸检测与人脸识别
+  Pin7高电平一次，触发人脸注册；默认低电平
+  UART1（Pin1）输出调试信息
+  UART3（Pin4）输出识别结果，当识别成功后，返回“Find It”（可自定义修改），可连接IoT平台
+  注：需配备SD卡，最大3支持2G，将main.py等文件放至SD卡根目录后上电
+'''
+
+import sensor, time, image
+import os, time
+import pyb
+from pyb import Pin
+
+red   = pyb.LED(1)
+green = pyb.LED(2)
+blue  = pyb.LED(3)
+infrared = pyb.LED(4)
+usart1 = pyb.UART(1, 115200)
+usart3 = pyb.UART(3, 115200)
+REGISTER_MODE = 0
+
+sensor.reset()
+sensor.set_contrast(1)
+sensor.set_gainceiling(16)
+sensor.set_framesize(sensor.HQVGA)
+sensor.set_pixformat(sensor.GRAYSCALE)
+sensor.skip_frames(10)
+
+Path_Backup = {'path':'', 'id':0}
+rootpath = "/orl_faces"
+DIST_THRESHOLD = 15000  # 差异度阈值
+
+def debug(strings):
+    print(strings)
+    usart1.write(str(strings)+"\r\n")
+
+def find(face_cascade, img):
+    objects = img.find_features(face_cascade, threshold=0.75, scale_factor=1.25)  # 人脸检测
+    if objects:
+        green.on()
+        time.sleep(500)
+        green.off()
+        width_old = 0
+        height_old = 0
+        index = 0
+        for r in objects:  # 寻找最大的face
+            if r[2] > width_old and r[3] > height_old:
+                width_old = r[2]
+                height_old = r[3]
+                index += 1
+        index -= 1
+        #print("index:", index)
+        img.draw_rectangle(objects[index])
+        d0 = img.find_lbp((0, 0, img.width(), img.height()))
+        res = match(d0)
+        if res != 0:
+            debug(res)
+            return 1
+
+
+def match(d0):  # 人脸识别
+    dir_lists = os.listdir(rootpath)  # 路径下文件夹
+    dir_num = len(dir_lists)          # 文件夹数量
+    debug("*" * 60)
+    debug("Total %d Folders -> %s"%(dir_num, str(dir_lists)))
+
+    for i in range(0, dir_num):
+        item_lists = os.listdir(rootpath+'/'+dir_lists[i])  # 路径下文件
+        item_num = len(item_lists)                          # 文件数量
+        debug("The %d Folder[%s], Total %d Files -> %s" %(i+1, dir_lists[i], item_num, str(item_lists)))
+
+        Path_Backup['path'] = rootpath+'/'+dir_lists[i]  # 马上记录当前路径
+        Path_Backup['id'] = item_num                     # 马上记录当前文件数量
+
+        for j in range(0, item_num):  # 文件依次对比
+            debug(">> Current File: " + item_lists[j])
+            try:
+                img = image.Image("/orl_faces/%s/%s" % (dir_lists[i], item_lists[j]), copy_to_fb=True)
+            except Exception as e:
+                debug(e)
+                break
+            d1 = img.find_lbp((0, 0, img.width(), img.height()))  # 提取特征值
+            dist = image.match_descriptor(d0, d1)                 # 计算差异度
+            debug(">> Difference Degree: " + str(dist))
+            if dist < DIST_THRESHOLD:
+                debug(">> ** Find It! **")
+                green.on()
+                time.sleep(1000)
+                green.off()
+                return item_lists[j]
+    debug(">> ** No Match! **")
+    return 0
+
+
+def register(face_cascade, img):
+    global REGISTER_MODE
+    if find(face_cascade, img) == 1:
+        debug(">> Existing without registration!")
+        REGISTER_MODE = 0
+        return 0
+
+    dir_lists = os.listdir(rootpath)  # 路径下文件夹
+    dir_num = len(dir_lists)          # 文件夹数量
+    new_dir = ("%s/%d") % (rootpath, int(dir_num)+1)
+    os.mkdir(new_dir)                 # 创建文件夹
+    cnt = 5  # 拍摄5次图片
+    while cnt:
+        img = sensor.snapshot()
+        objects = img.find_features(face_cascade, threshold=0.75, scale_factor=1.25)  # 人脸检测
+        if objects:
+            width_old = 0
+            height_old = 0
+            index = 0
+            for r in objects:  # 寻找最大的face
+                if r[2] > width_old and r[3] > height_old:
+                    width_old = r[2]
+                    height_old = r[3]
+                    index += 1
+            index -= 1
+            #print("index:", index)
+
+            item_lists = os.listdir(new_dir)  # 新路径下文件
+            item_num = len(item_lists)        # 文件数量
+            img.save("%s/%d.pgm" % (new_dir, item_num))  # 写入文件
+            debug(">> [%d]Regist OK!" % cnt)
+            img.draw_rectangle(objects[index])
+            green.on()
+            time.sleep(50)
+            green.off()
+            cnt -= 1
+            if cnt==0:
+                green.on()
+                time.sleep(1000)
+                green.off()
+        REGISTER_MODE = 0
+
+
+
+def main():
+    global REGISTER_MODE
+    try:
+        os.mkdir(rootpath)
+    except:
+        pass
+    pin7 = Pin('P7', Pin.IN, Pin.PULL_DOWN)  # 1为注册模式，即拍照存入
+    face_cascade = image.HaarCascade("frontalface", stages=25)
+    #try:
+        #face_cascade = image.HaarCascade("/haarcascade_frontalcatface.cascade", stages=25)  # "frontalface"
+    #except:
+        #face_cascade = image.HaarCascade("frontalface", stages=25)
+    print(face_cascade)
+    clock = time.clock()
+    img = None
+
+    while (True):
+        clock.tick()
+        img = sensor.snapshot()
+        if pin7.value() == 1:
+            REGISTER_MODE = 1
+
+        if REGISTER_MODE == 1:
+            debug("REGISTER_MODE\r\n")
+            register(face_cascade, img)
+        else:
+            res = find(face_cascade, img)
+            if res==1:
+                usart3.write("Find It\r\n")
+
+
+# 程序开始
+#debug(os.listdir())
+main()
+
